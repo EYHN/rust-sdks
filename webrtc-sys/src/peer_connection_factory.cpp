@@ -16,11 +16,15 @@
 
 #include "livekit/peer_connection_factory.h"
 
+#include <algorithm>
 #include <cstdlib>
 #include <memory>
 #include <utility>
+#include <vector>
 
+#include "api/fec_controller.h"
 #include "api/field_trials.h"
+#include "modules/video_coding/fec_controller_default.h"
 
 #include "api/audio_codecs/builtin_audio_decoder_factory.h"
 #include "api/audio_codecs/builtin_audio_encoder_factory.h"
@@ -71,6 +75,84 @@ webrtc::Environment CreateEnvironmentFromEnvVar() {
   return factory.Create();
 }
 
+// SimKit patch: proactive FEC. The default FEC controller only spends
+// redundancy once RTCP receiver reports come back lossy, which leaves the
+// first ~1-2s of every loss burst unprotected — exactly the window that
+// turns into a PLI keyframe round on links without NACK. This wrapper
+// floors the loss estimate fed into the FEC rate tables so a baseline
+// redundancy stream flows even while the link looks clean; real loss above
+// the floor still raises protection as usual.
+class FloorLossFecController : public webrtc::FecController {
+ public:
+  FloorLossFecController(const webrtc::Environment& env, uint8_t floor_fraction)
+      : inner_(env), floor_fraction_(floor_fraction) {}
+
+  void SetProtectionCallback(
+      webrtc::VCMProtectionCallback* protection_callback) override {
+    inner_.SetProtectionCallback(protection_callback);
+  }
+  void SetProtectionMethod(bool enable_fec, bool enable_nack) override {
+    inner_.SetProtectionMethod(enable_fec, enable_nack);
+  }
+  void SetEncodingData(size_t width, size_t height,
+                       size_t num_temporal_layers,
+                       size_t max_payload_size) override {
+    inner_.SetEncodingData(width, height, num_temporal_layers,
+                           max_payload_size);
+  }
+  uint32_t UpdateFecRates(uint32_t estimated_bitrate_bps, int actual_framerate,
+                          uint8_t fraction_lost,
+                          std::vector<bool> loss_mask_vector,
+                          int64_t round_trip_time_ms) override {
+    return inner_.UpdateFecRates(estimated_bitrate_bps, actual_framerate,
+                                 std::max(fraction_lost, floor_fraction_),
+                                 std::move(loss_mask_vector),
+                                 round_trip_time_ms);
+  }
+  void UpdateWithEncodedData(
+      size_t encoded_image_length,
+      webrtc::VideoFrameType encoded_image_frametype) override {
+    inner_.UpdateWithEncodedData(encoded_image_length,
+                                 encoded_image_frametype);
+  }
+  bool UseLossVectorMask() override { return inner_.UseLossVectorMask(); }
+
+ private:
+  webrtc::FecControllerDefault inner_;
+  const uint8_t floor_fraction_;
+};
+
+class FloorLossFecControllerFactory
+    : public webrtc::FecControllerFactoryInterface {
+ public:
+  explicit FloorLossFecControllerFactory(uint8_t floor_fraction)
+      : floor_fraction_(floor_fraction) {}
+  std::unique_ptr<webrtc::FecController> CreateFecController(
+      const webrtc::Environment& env) override {
+    return std::make_unique<FloorLossFecController>(env, floor_fraction_);
+  }
+
+ private:
+  const uint8_t floor_fraction_;
+};
+
+// SIMKIT_FEC_MIN_LOSS_PCT (1-100) enables the proactive-FEC controller with
+// the given assumed-loss floor in percent; unset/0 keeps stock behavior.
+std::unique_ptr<webrtc::FecControllerFactoryInterface>
+MaybeCreateFecControllerFactory() {
+  const char* pct_str = std::getenv("SIMKIT_FEC_MIN_LOSS_PCT");
+  if (pct_str == nullptr || pct_str[0] == '\0') {
+    return nullptr;
+  }
+  int pct = std::atoi(pct_str);
+  if (pct <= 0) {
+    return nullptr;
+  }
+  pct = std::min(pct, 100);
+  const uint8_t fraction = static_cast<uint8_t>(pct * 255 / 100);
+  return std::make_unique<FloorLossFecControllerFactory>(fraction);
+}
+
 }  // namespace
 
 PeerConnectionFactory::PeerConnectionFactory(
@@ -86,6 +168,8 @@ PeerConnectionFactory::PeerConnectionFactory(
   dependencies.signaling_thread = rtc_runtime_->signaling_thread();
   dependencies.socket_factory = rtc_runtime_->network_thread()->socketserver();
   dependencies.event_log_factory = std::make_unique<webrtc::RtcEventLogFactory>();
+  // SimKit patch: optional proactive-FEC controller (see above).
+  dependencies.fec_controller_factory = MaybeCreateFecControllerFactory();
 
   // Create AdmProxy - it creates and initializes Platform ADM internally
   adm_proxy_ = rtc_runtime_->worker_thread()->BlockingCall([&] {
