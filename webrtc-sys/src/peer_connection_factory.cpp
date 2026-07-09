@@ -16,8 +16,11 @@
 
 #include "livekit/peer_connection_factory.h"
 
+#include <cstdlib>
 #include <memory>
 #include <utility>
+
+#include "api/field_trials.h"
 
 #include "api/audio_codecs/builtin_audio_decoder_factory.h"
 #include "api/audio_codecs/builtin_audio_encoder_factory.h"
@@ -49,11 +52,35 @@ namespace livekit_ffi {
 
 class PeerConnectionObserver;
 
+namespace {
+
+// SimKit patch: honor the WEBRTC_FIELD_TRIALS environment variable when
+// building the factory Environment. libwebrtc's modern Environment plumbing
+// ignores the legacy global field-trial string, so an explicit FieldTrials
+// injection is the only way to flip runtime-gated features (e.g.
+// WebRTC-FlexFEC-03) from the prebuilt static library.
+webrtc::Environment CreateEnvironmentFromEnvVar() {
+  webrtc::EnvironmentFactory factory;
+  const char* trials = std::getenv("WEBRTC_FIELD_TRIALS");
+  if (trials != nullptr && trials[0] != '\0') {
+    if (auto field_trials = webrtc::FieldTrials::Create(trials)) {
+      factory.Set(std::unique_ptr<const webrtc::FieldTrialsView>(
+          std::move(field_trials)));
+    }
+  }
+  return factory.Create();
+}
+
+}  // namespace
+
 PeerConnectionFactory::PeerConnectionFactory(
     std::shared_ptr<RtcRuntime> rtc_runtime)
     : rtc_runtime_(rtc_runtime),
-    env_(webrtc::EnvironmentFactory().Create()) {
+    env_(CreateEnvironmentFromEnvVar()) {
   webrtc::PeerConnectionFactoryDependencies dependencies;
+  // SimKit patch: hand the field-trial-aware Environment to the factory so
+  // every call/stream created from it sees the trials.
+  dependencies.env = env_;
   dependencies.network_thread = rtc_runtime_->network_thread();
   dependencies.worker_thread = rtc_runtime_->worker_thread();
   dependencies.signaling_thread = rtc_runtime_->signaling_thread();
