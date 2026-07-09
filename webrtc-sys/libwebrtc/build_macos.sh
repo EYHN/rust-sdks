@@ -88,6 +88,9 @@ apply_patch_if_needed "$COMMAND_DIR/patches/fix_license_json_parsing.patch"
 apply_patch_if_needed "$COMMAND_DIR/patches/ssl_verify_callback_with_native_handle.patch"
 apply_patch_if_needed "$COMMAND_DIR/patches/add_deps.patch"
 apply_patch_if_needed "$COMMAND_DIR/patches/external_audio_source.patch"
+# SimKit: H265 temporal layers (L1T2) via VideoToolbox + generic frame
+# descriptor mapping so receivers can skip lost enhancement-layer frames.
+apply_patch_if_needed "$COMMAND_DIR/patches/h265_temporal_layers.patch"
 
 cd ..
 
