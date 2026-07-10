@@ -262,7 +262,88 @@
  
    // We can only set average bitrate on the HW encoder.
    _targetBitrateBps = settings.startBitrate;
-@@ -461,6 +518,28 @@
+@@ -392,9 +449,21 @@
+                          kCFBooleanTrue);
+   }
+ 
+-  // kVTVideoEncoderSpecification_EnableLowLatencyRateControl restricts the encoder to "High
+-  // profiles" per VTCompressionProperties.h. HEVC has no High profile family (Main / Main10 / ...),
+-  // so requesting it forces VideoToolbox to disable hardware acceleration for HEVC.
++  // Temporal layers require the low-latency rate controller:
++  // kVTCompressionPropertyKey_BaseLayerFrameRateFraction is rejected with
++  // kVTPropertyNotSupportedErr (-12900) on standard sessions. Low-latency
++  // HEVC encoding is hardware-only and supported since macOS 12 / iOS 15
++  // on Apple Silicon; if session creation fails we retry without it and
++  // fall back to a single layer.
++  if (_temporalLayers > 1) {
++    if (@available(iOS 15.0, macOS 12.0, *)) {
++      CFDictionarySetValue(encoder_specs,
++                           kVTVideoEncoderSpecification_EnableLowLatencyRateControl,
++                           kCFBooleanTrue);
++    } else {
++      _temporalLayers = 1;
++    }
++  }
+ 
+   OSStatus status =
+       VTCompressionSessionCreate(nullptr,  // use default allocator
+@@ -403,7 +472,12 @@
+                                  sourceAttributes,
+                                  nullptr,  // use default compressed data allocator
+                                  compressionOutputCallback, nullptr, &_compressionSession);
+-  if (status != noErr) {
++  if (status != noErr && _temporalLayers > 1) {
++    RTC_LOG(LS_WARNING) << "Failed to create low-latency h265 compression session: " << status
++                        << "; retrying without temporal layers.";
++    _temporalLayers = 1;
++    CFDictionaryRemoveValue(encoder_specs,
++                            kVTVideoEncoderSpecification_EnableLowLatencyRateControl);
+     status =
+         VTCompressionSessionCreate(nullptr,  // use default allocator
+                                    _width, _height, kCMVideoCodecType_HEVC,
+@@ -411,6 +485,14 @@
+                                    sourceAttributes,
+                                    nullptr,  // use default compressed data allocator
+                                    compressionOutputCallback, nullptr, &_compressionSession);
++  } else if (status != noErr) {
++    status =
++        VTCompressionSessionCreate(nullptr,  // use default allocator
++                                   _width, _height, kCMVideoCodecType_HEVC,
++                                   encoder_specs,  // use hardware accelerated encoder if available
++                                   sourceAttributes,
++                                   nullptr,  // use default compressed data allocator
++                                   compressionOutputCallback, nullptr, &_compressionSession);
+   }
+   if (sourceAttributes) {
+     CFRelease(sourceAttributes);
+@@ -429,7 +511,8 @@
+     status = VTSessionCopyProperty(_compressionSession,
+                                    kVTCompressionPropertyKey_UsingHardwareAcceleratedVideoEncoder,
+                                    kCFAllocatorDefault, &hwaccl_enabled);
+-    if (status == noErr && (CFBooleanGetValue(hwaccl_enabled))) {
++    BOOL hwAccelerated = (status == noErr && CFBooleanGetValue(hwaccl_enabled));
++    if (hwAccelerated) {
+       RTC_LOG(LS_INFO) << "Compression session created with hw accl enabled";
+     } else {
+       RTC_LOG(LS_INFO) << "Compression session created with hw accl disabled";
+@@ -437,6 +520,16 @@
+     if (hwaccl_enabled) {
+       CFRelease(hwaccl_enabled);
+     }
++    // Never trade hardware encoding for temporal layers: if the
++    // low-latency session landed on a software encoder, recreate a
++    // standard hardware session with a single layer instead.
++    if (!hwAccelerated && _temporalLayers > 1) {
++      RTC_LOG(LS_WARNING)
++          << "Low-latency h265 session is not hardware accelerated; "
++             "disabling temporal layers and recreating.";
++      _temporalLayers = 1;
++      return [self resetCompressionSession];
++    }
+   }
+   [self configureCompressionSession];
+   return WEBRTC_VIDEO_CODEC_OK;
+@@ -461,6 +554,28 @@
    // Reduce the encoder's internal buffering for lower latency if available.
    // kVTCompressionPropertyKey_MaxFrameDelayCount is supported on macOS/iOS for HEVC.
    // SetVTSessionProperty(_compressionSession, kVTCompressionPropertyKey_MaxFrameDelayCount, 1);
@@ -291,7 +372,7 @@
    [self setEncoderBitrateBps:_targetBitrateBps];
  
    // Set a relatively large value for keyframe emission (7200 frames or 4 minutes).
-@@ -558,7 +637,20 @@
+@@ -558,7 +673,20 @@
    auto qp = _h265BitstreamParser.GetLastSliceQp();
    frame.qp = @(qp.value_or(0));
  
