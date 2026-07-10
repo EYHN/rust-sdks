@@ -384,3 +384,173 @@
    if (!res) {
      RTC_LOG(LS_ERROR) << "Encode callback failed.";
      return;
+--- a/sdk/objc/components/video_codec/RTCCodecSpecificInfoH264.h
++++ b/sdk/objc/components/video_codec/RTCCodecSpecificInfoH264.h
+@@ -24,4 +24,11 @@
+ 
+ @property(nonatomic, assign) RTC_OBJC_TYPE(RTCH264PacketizationMode) packetizationMode;
+ 
++/** Temporal layer id of this frame (0 = base layer). */
++@property(nonatomic, assign) uint8_t temporalIdx;
++/** True when this frame only references the base temporal layer. */
++@property(nonatomic, assign) BOOL baseLayerSync;
++/** True for IDR frames. */
++@property(nonatomic, assign) BOOL idrFrame;
++
+ @end
+--- a/sdk/objc/components/video_codec/RTCCodecSpecificInfoH264.mm
++++ b/sdk/objc/components/video_codec/RTCCodecSpecificInfoH264.mm
+@@ -16,12 +16,18 @@
+ @implementation RTC_OBJC_TYPE (RTCCodecSpecificInfoH264)
+ 
+ @synthesize packetizationMode = _packetizationMode;
++@synthesize temporalIdx = _temporalIdx;
++@synthesize baseLayerSync = _baseLayerSync;
++@synthesize idrFrame = _idrFrame;
+ 
+ - (webrtc::CodecSpecificInfo)nativeCodecSpecificInfo {
+   webrtc::CodecSpecificInfo codecSpecificInfo;
+   codecSpecificInfo.codecType = webrtc::kVideoCodecH264;
+   codecSpecificInfo.codecSpecific.H264.packetization_mode =
+       (webrtc::H264PacketizationMode)_packetizationMode;
++  codecSpecificInfo.codecSpecific.H264.temporal_idx = _temporalIdx;
++  codecSpecificInfo.codecSpecific.H264.base_layer_sync = _baseLayerSync;
++  codecSpecificInfo.codecSpecific.H264.idr_frame = _idrFrame;
+ 
+   return codecSpecificInfo;
+ }
+--- a/sdk/objc/components/video_codec/RTCVideoEncoderH264.mm
++++ b/sdk/objc/components/video_codec/RTCVideoEncoderH264.mm
+@@ -30,6 +30,8 @@
+ 
+ #include "api/video/video_timing.h"
+ #include "api/video_codecs/h264_profile_level_id.h"
++#include <cstdlib>
++
+ #include "common_video/h264/h264_bitstream_parser.h"
+ #include "common_video/include/bitrate_adjuster.h"
+ #include "modules/video_coding/include/video_error_codes.h"
+@@ -380,6 +382,29 @@
+   }
+   return "<unknown>";
+ }
++
++// Number of temporal layers to encode (1 = off). VideoToolbox exposes one
++// enhancement sublayer via kVTCompressionPropertyKey_BaseLayerFrameRateFraction,
++// so 2 (L1T2) is the maximum, and only on low-latency sessions — which for
++// H264 require a High-family profile. Controlled by the
++// SIMKIT_H264_TEMPORAL_LAYERS environment variable so embedders can enable
++// layering without new plumbing through the codec-settings conversions.
++int H264TemporalLayerCountFromEnv() {
++  const char *value = std::getenv("SIMKIT_H264_TEMPORAL_LAYERS");
++  if (value == nullptr || value[0] == '\0') {
++    return 1;
++  }
++  int layers = atoi(value);
++  if (layers <= 1) {
++    return 1;
++  }
++  if (layers > 2) {
++    RTC_LOG(LS_WARNING) << "SIMKIT_H264_TEMPORAL_LAYERS=" << layers
++                        << " requested but VideoToolbox supports at most 2 "
++                           "temporal sublayers; using 2 (L1T2).";
++  }
++  return 2;
++}
+ }  // namespace
+ 
+ @implementation RTC_OBJC_TYPE (RTCVideoEncoderH264) {
+@@ -391,6 +416,7 @@
+   uint32_t _maxAllowedFrameRate;
+   RTC_OBJC_TYPE(RTCH264PacketizationMode) _packetizationMode;
+   std::optional<webrtc::H264ProfileLevelId> _profile_level_id;
++  int _temporalLayers;
+   RTCVideoEncoderCallback _callback;
+   int32_t _width;
+   int32_t _height;
+@@ -447,6 +473,18 @@
+   _height = settings.height;
+   _codecMode = settings.mode;
+   _maxQP = settings.qpMax;
++  // Temporal layers need the low-latency rate controller, which VideoToolbox
++  // only pairs with High-family H264 profiles (see IsH264HighProfileFamily).
++  _temporalLayers = H264TemporalLayerCountFromEnv();
++  if (_temporalLayers > 1 && !IsH264HighProfileFamily(_profile_level_id)) {
++    RTC_LOG(LS_INFO) << "H264: temporal layers requested but profile "
++                     << H264ProfileName(_profile_level_id)
++                     << " is not in the High family; disabling layering.";
++    _temporalLayers = 1;
++  } else if (_temporalLayers > 1) {
++    RTC_LOG(LS_INFO) << "h264 encoder using " << _temporalLayers
++                     << " temporal layers (L1T" << _temporalLayers << ")";
++  }
+ 
+   _encodeMode = RTC_OBJC_TYPE(RTCVideoEncodeModeVariable);                    // Always variable mode for now
+   _minBitrate = settings.minBitrate * 1000;  // minBitrate is in kbps.
+@@ -829,6 +867,29 @@
+       ExtractProfile(*_profile_level_id, _codecMode == RTC_OBJC_TYPE(RTCVideoCodecModeScreensharing)));
+   SetVTSessionProperty(_compressionSession, kVTCompressionPropertyKey_AllowFrameReordering, false);
+ 
++  // Two temporal sublayers (L1T2): the enhancement layer carries every other
++  // frame and is never referenced by base-layer frames, so receivers can
++  // drop lost enhancement frames without breaking the decode chain. Only
++  // valid on low-latency sessions (High-family profiles, checked at start).
++  if (_temporalLayers > 1) {
++    if (@available(iOS 15.0, macOS 12.0, *)) {
++      const float baseLayerFraction = 0.5f;
++      CFNumberRef fraction =
++          CFNumberCreate(nullptr, kCFNumberFloatType, &baseLayerFraction);
++      OSStatus fractionStatus = VTSessionSetProperty(
++          _compressionSession, kVTCompressionPropertyKey_BaseLayerFrameRateFraction, fraction);
++      CFRelease(fraction);
++      if (fractionStatus != noErr) {
++        RTC_LOG(LS_WARNING)
++            << "Failed to enable h264 temporal layers (BaseLayerFrameRateFraction): "
++            << fractionStatus;
++        _temporalLayers = 1;
++      }
++    } else {
++      _temporalLayers = 1;
++    }
++  }
++
+   // [self updateEncoderBitrateAndFrameRate];
+ 
+   // TODO(tkchin): Look at entropy mode and colorspace matrices.
+@@ -984,6 +1045,36 @@
+   _h264BitstreamParser.ParseBitstream(*buffer);
+   frame.qp = @(_h264BitstreamParser.GetLastSliceQp().value_or(-1));
+ 
++  if ([codecSpecificInfo isKindOfClass:[RTC_OBJC_TYPE(RTCCodecSpecificInfoH264) class]]) {
++    RTC_OBJC_TYPE(RTCCodecSpecificInfoH264) *h264Info =
++        (RTC_OBJC_TYPE(RTCCodecSpecificInfoH264) *)codecSpecificInfo;
++    h264Info.idrFrame = isKeyframe;
++    if (_temporalLayers > 1 && !isKeyframe) {
++      // H264 NAL headers carry no temporal id; with the low-latency
++      // hierarchical-P structure VideoToolbox marks enhancement-layer
++      // frames as not depended on by others.
++      BOOL dependedOn = YES;
++      if (attachments != nullptr && CFArrayGetCount(attachments)) {
++        CFDictionaryRef attachment =
++            static_cast<CFDictionaryRef>(CFArrayGetValueAtIndex(attachments, 0));
++        CFBooleanRef value = static_cast<CFBooleanRef>(CFDictionaryGetValue(
++            attachment, kCMSampleAttachmentKey_IsDependedOnByOthers));
++        if (value != nullptr) {
++          dependedOn = CFBooleanGetValue(value);
++        }
++      }
++      const uint8_t temporalId = dependedOn ? 0 : 1;
++      h264Info.temporalIdx = temporalId;
++      // VideoToolbox hierarchical-P: enhancement-layer frames reference only
++      // the base layer (frame reordering is disabled), so every TL1 frame is
++      // a base-layer sync point.
++      h264Info.baseLayerSync = temporalId > 0;
++    } else {
++      h264Info.temporalIdx = 0;
++      h264Info.baseLayerSync = NO;
++    }
++  }
++
+   BOOL res = callback(frame, codecSpecificInfo);
+   if (!res) {
+     RTC_LOG(LS_ERROR) << "Encode callback failed";
