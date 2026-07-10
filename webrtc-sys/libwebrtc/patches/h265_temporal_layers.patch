@@ -185,11 +185,10 @@
  #include <vector>
  
  #import "RTCCodecSpecificInfoH265.h"
-@@ -56,6 +57,56 @@
- // have been found to work better on devices that support VideoToolbox
+@@ -57,6 +58,56 @@
  const int kLowh265QpThreshold = 28;
  const int kHighh265QpThreshold = 39;
-+
+ 
 +// Number of temporal layers to encode (1 = off). VideoToolbox exposes
 +// exactly one enhancement layer via
 +// kVTCompressionPropertyKey_BaseLayerFrameRateFraction, so 2 (L1T2) is the
@@ -239,9 +238,10 @@
 +  }
 +  return 0;
 +}
- 
++
  // Struct that we pass to the encoder per frame to encode. We receive it again
  // in the encoder callback.
+ struct API_AVAILABLE(ios(11.0)) RTC_OBJC_TYPE(RTCFrameEncodeParams) {
 @@ -156,6 +207,7 @@
    int framesLeft;
    std::vector<uint8_t> _nv12ScaleBuffer;
@@ -316,34 +316,24 @@
    }
    if (sourceAttributes) {
      CFRelease(sourceAttributes);
-@@ -429,7 +511,8 @@
+@@ -429,10 +511,13 @@
      status = VTSessionCopyProperty(_compressionSession,
                                     kVTCompressionPropertyKey_UsingHardwareAcceleratedVideoEncoder,
                                     kCFAllocatorDefault, &hwaccl_enabled);
 -    if (status == noErr && (CFBooleanGetValue(hwaccl_enabled))) {
-+    BOOL hwAccelerated = (status == noErr && CFBooleanGetValue(hwaccl_enabled));
-+    if (hwAccelerated) {
-       RTC_LOG(LS_INFO) << "Compression session created with hw accl enabled";
+-      RTC_LOG(LS_INFO) << "Compression session created with hw accl enabled";
++    if (status == noErr && hwaccl_enabled != nullptr) {
++      RTC_LOG(LS_INFO) << "Compression session created with hw accl "
++                       << (CFBooleanGetValue(hwaccl_enabled) ? "enabled" : "disabled");
      } else {
-       RTC_LOG(LS_INFO) << "Compression session created with hw accl disabled";
-@@ -437,6 +520,16 @@
+-      RTC_LOG(LS_INFO) << "Compression session created with hw accl disabled";
++      // Low-latency sessions reject this query (kVTPropertyNotSupportedErr)
++      // — they are hardware-only by definition, so nothing to check.
++      RTC_LOG(LS_INFO) << "Compression session hw accl query unsupported: " << status;
+     }
      if (hwaccl_enabled) {
        CFRelease(hwaccl_enabled);
-     }
-+    // Never trade hardware encoding for temporal layers: if the
-+    // low-latency session landed on a software encoder, recreate a
-+    // standard hardware session with a single layer instead.
-+    if (!hwAccelerated && _temporalLayers > 1) {
-+      RTC_LOG(LS_WARNING)
-+          << "Low-latency h265 session is not hardware accelerated; "
-+             "disabling temporal layers and recreating.";
-+      _temporalLayers = 1;
-+      return [self resetCompressionSession];
-+    }
-   }
-   [self configureCompressionSession];
-   return WEBRTC_VIDEO_CODEC_OK;
-@@ -461,6 +554,28 @@
+@@ -461,6 +546,28 @@
    // Reduce the encoder's internal buffering for lower latency if available.
    // kVTCompressionPropertyKey_MaxFrameDelayCount is supported on macOS/iOS for HEVC.
    // SetVTSessionProperty(_compressionSession, kVTCompressionPropertyKey_MaxFrameDelayCount, 1);
@@ -372,7 +362,7 @@
    [self setEncoderBitrateBps:_targetBitrateBps];
  
    // Set a relatively large value for keyframe emission (7200 frames or 4 minutes).
-@@ -558,7 +673,20 @@
+@@ -558,7 +665,20 @@
    auto qp = _h265BitstreamParser.GetLastSliceQp();
    frame.qp = @(qp.value_or(0));
  
