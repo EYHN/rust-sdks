@@ -84,6 +84,18 @@ pub mod native {
             Self { handle: vs_imp::NativeVideoSource::new(resolution, is_screencast) }
         }
 
+        /// Creates a raw-frame source without injecting an initial black
+        /// keepalive frame.
+        ///
+        /// Use this when each encoded frame must retain an exact association
+        /// with metadata registered before capture. Until the caller captures
+        /// the first raw frame, the track intentionally has no frame.
+        pub fn new_without_keepalive(resolution: VideoResolution, is_screencast: bool) -> Self {
+            Self {
+                handle: vs_imp::NativeVideoSource::new_without_keepalive(resolution, is_screencast),
+            }
+        }
+
         /// Creates a source for pre-encoded access units: no raw black-frame
         /// keepalive is injected before the first capture.
         pub fn new_encoded(resolution: VideoResolution) -> Self {
