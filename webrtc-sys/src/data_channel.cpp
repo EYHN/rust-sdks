@@ -84,6 +84,14 @@ rust::String DataChannel::label() const {
   return data_channel_->label();
 }
 
+bool DataChannel::reliable() const {
+  return data_channel_->reliable();
+}
+
+bool DataChannel::ordered() const {
+  return data_channel_->ordered();
+}
+
 DataState DataChannel::state() const {
   return static_cast<DataState>(data_channel_->state());
 }

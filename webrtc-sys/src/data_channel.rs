@@ -68,6 +68,8 @@ pub mod ffi {
         fn send(self: &DataChannel, data: &DataBuffer) -> bool;
         fn id(self: &DataChannel) -> i32;
         fn label(self: &DataChannel) -> String;
+        fn reliable(self: &DataChannel) -> bool;
+        fn ordered(self: &DataChannel) -> bool;
         fn state(self: &DataChannel) -> DataState;
         fn close(self: &DataChannel);
         fn buffered_amount(self: &DataChannel) -> u64;

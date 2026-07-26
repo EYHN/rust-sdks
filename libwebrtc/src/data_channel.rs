@@ -89,6 +89,19 @@ impl DataChannel {
         self.handle.label()
     }
 
+    /// Whether delivery is fully reliable.
+    ///
+    /// This is `false` when either a retransmit-count or packet-lifetime limit
+    /// configured partial reliability for the channel.
+    pub fn reliable(&self) -> bool {
+        self.handle.reliable()
+    }
+
+    /// Whether messages are delivered in order.
+    pub fn ordered(&self) -> bool {
+        self.handle.ordered()
+    }
+
     pub fn state(&self) -> DataChannelState {
         self.handle.state()
     }
