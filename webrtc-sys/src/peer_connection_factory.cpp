@@ -19,28 +19,27 @@
 #include <algorithm>
 #include <cstdlib>
 #include <memory>
+#include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
-#include "api/fec_controller.h"
-#include "api/field_trials.h"
-#include "modules/video_coding/fec_controller_default.h"
-
+#include "api/audio/audio_device.h"
+#include "api/audio/builtin_audio_processing_builder.h"
 #include "api/audio_codecs/builtin_audio_decoder_factory.h"
 #include "api/audio_codecs/builtin_audio_encoder_factory.h"
-#include "api/audio/builtin_audio_processing_builder.h"
+#include "api/audio_options.h"
 #include "api/create_modular_peer_connection_factory.h"
+#include "api/enable_media.h"
 #include "api/environment/environment_factory.h"
+#include "api/fec_controller.h"
 #include "api/field_trials_view.h"
 #include "api/peer_connection_interface.h"
 #include "api/rtc_error.h"
-#include "api/enable_media.h"
 #include "api/rtc_event_log/rtc_event_log_factory.h"
 #include "api/task_queue/default_task_queue_factory.h"
 #include "api/video_codecs/builtin_video_decoder_factory.h"
 #include "api/video_codecs/builtin_video_encoder_factory.h"
-#include "api/audio/audio_device.h"
-#include "api/audio_options.h"
 #include "livekit/adm_proxy.h"
 #include "livekit/audio_track.h"
 #include "livekit/peer_connection.h"
@@ -49,6 +48,8 @@
 #include "livekit/video_decoder_factory.h"
 #include "livekit/video_encoder_factory.h"
 #include "livekit/webrtc.h"
+#include "modules/video_coding/fec_controller_default.h"
+#include "rtc_base/checks.h"
 #include "rtc_base/thread.h"
 #include "webrtc-sys/src/peer_connection.rs.h"
 #include "webrtc-sys/src/peer_connection_factory.rs.h"
@@ -66,28 +67,100 @@ class PeerConnectionObserver;
 
 namespace {
 
-// SimKit patch: honor the WEBRTC_FIELD_TRIALS environment variable when
-// building the factory Environment. libwebrtc's modern Environment plumbing
-// ignores the legacy global field-trial string, so an explicit FieldTrials
-// injection is the only way to flip runtime-gated features (e.g.
-// WebRTC-FlexFEC-03) from the prebuilt static library. The upstream
-// zero-playout-delay switch rides the same injection: its trial string is
-// appended to whatever the env var carries.
+// SimKit patch: inject field trials without calling webrtc::FieldTrials.
+// The public headers declare FieldTrials::Create, but the official prebuilt
+// archives used by non-macOS consumers do not export that implementation.
+// Keeping the immutable view in this wrapper makes the same source link
+// against both the official archives and SimKit's pinned macOS archive.
+class InjectedFieldTrials final : public webrtc::FieldTrialsView {
+ public:
+  InjectedFieldTrials(const InjectedFieldTrials&) = default;
+
+  static std::unique_ptr<InjectedFieldTrials> Create(
+      const std::string& serialized) {
+    auto result =
+        std::unique_ptr<InjectedFieldTrials>(new InjectedFieldTrials());
+    if (!result->Parse(serialized)) {
+      return nullptr;
+    }
+    return result;
+  }
+
+  std::string Lookup(absl::string_view key) const override {
+    const auto found = values_.find(std::string(key.data(), key.size()));
+    return found == values_.end() ? std::string() : found->second;
+  }
+
+  std::unique_ptr<webrtc::FieldTrialsView> CreateCopy() const override {
+    return std::make_unique<InjectedFieldTrials>(*this);
+  }
+
+  void Set(std::string trial, std::string group) {
+    RTC_CHECK(!trial.empty());
+    RTC_CHECK(!group.empty());
+    values_.insert_or_assign(std::move(trial), std::move(group));
+  }
+
+ private:
+  InjectedFieldTrials() = default;
+
+  bool Parse(const std::string& serialized) {
+    if (serialized.empty()) {
+      return true;
+    }
+    if (serialized.back() != '/') {
+      return false;
+    }
+
+    size_t cursor = 0;
+    while (cursor < serialized.size()) {
+      const size_t trial_end = serialized.find('/', cursor);
+      if (trial_end == std::string::npos || trial_end == cursor) {
+        return false;
+      }
+      const size_t group_start = trial_end + 1;
+      const size_t group_end = serialized.find('/', group_start);
+      if (group_end == std::string::npos || group_end == group_start) {
+        return false;
+      }
+
+      std::string trial = serialized.substr(cursor, trial_end - cursor);
+      std::string group =
+          serialized.substr(group_start, group_end - group_start);
+      if (values_.find(trial) != values_.end()) {
+        return false;
+      }
+      values_.emplace(std::move(trial), std::move(group));
+      cursor = group_end + 1;
+    }
+    return true;
+  }
+
+  std::unordered_map<std::string, std::string> values_;
+};
+
+// Honor WEBRTC_FIELD_TRIALS in the factory Environment. Invalid input is a
+// configuration error and terminates factory creation instead of silently
+// falling back to default media behavior. The explicit low-latency setting is
+// applied after parsing and therefore intentionally overrides the same key.
 webrtc::Environment CreateEnvironmentFromEnvVar(bool zero_playout_delay) {
   webrtc::EnvironmentFactory factory;
-  std::string trials;
+  std::string serialized_trials;
   if (const char* env_trials = std::getenv("WEBRTC_FIELD_TRIALS")) {
-    trials = env_trials;
+    serialized_trials = env_trials;
   }
+  if (serialized_trials.empty() && !zero_playout_delay) {
+    return factory.Create();
+  }
+
+  auto field_trials = InjectedFieldTrials::Create(serialized_trials);
+  RTC_CHECK(field_trials != nullptr)
+      << "WEBRTC_FIELD_TRIALS has invalid key/group serialization";
   if (zero_playout_delay) {
-    trials += kForcePlayoutDelayFieldTrial;
+    field_trials->Set("WebRTC-ForcePlayoutDelay", kForcePlayoutDelayValue);
   }
-  if (!trials.empty()) {
-    if (auto field_trials = webrtc::FieldTrials::Create(trials)) {
-      factory.Set(std::unique_ptr<const webrtc::FieldTrialsView>(
-          std::move(field_trials)));
-    }
-  }
+  factory.Set(
+      std::unique_ptr<const webrtc::FieldTrialsView>(std::move(field_trials)));
   return factory.Create();
 }
 
@@ -110,13 +183,15 @@ class FloorLossFecController : public webrtc::FecController {
   void SetProtectionMethod(bool enable_fec, bool enable_nack) override {
     inner_.SetProtectionMethod(enable_fec, enable_nack);
   }
-  void SetEncodingData(size_t width, size_t height,
+  void SetEncodingData(size_t width,
+                       size_t height,
                        size_t num_temporal_layers,
                        size_t max_payload_size) override {
     inner_.SetEncodingData(width, height, num_temporal_layers,
                            max_payload_size);
   }
-  uint32_t UpdateFecRates(uint32_t estimated_bitrate_bps, int actual_framerate,
+  uint32_t UpdateFecRates(uint32_t estimated_bitrate_bps,
+                          int actual_framerate,
                           uint8_t fraction_lost,
                           std::vector<bool> loss_mask_vector,
                           int64_t round_trip_time_ms) override {
@@ -128,8 +203,7 @@ class FloorLossFecController : public webrtc::FecController {
   void UpdateWithEncodedData(
       size_t encoded_image_length,
       webrtc::VideoFrameType encoded_image_frametype) override {
-    inner_.UpdateWithEncodedData(encoded_image_length,
-                                 encoded_image_frametype);
+    inner_.UpdateWithEncodedData(encoded_image_length, encoded_image_frametype);
   }
   bool UseLossVectorMask() override { return inner_.UseLossVectorMask(); }
 
@@ -188,7 +262,8 @@ PeerConnectionFactory::PeerConnectionFactory(
   dependencies.worker_thread = rtc_runtime_->worker_thread();
   dependencies.signaling_thread = rtc_runtime_->signaling_thread();
   dependencies.socket_factory = rtc_runtime_->network_thread()->socketserver();
-  dependencies.event_log_factory = std::make_unique<webrtc::RtcEventLogFactory>();
+  dependencies.event_log_factory =
+      std::make_unique<webrtc::RtcEventLogFactory>();
   if (zero_playout_delay) {
     RTC_LOG(LS_INFO) << "WebRTC zero playout delay enabled with field trial: "
                      << kForcePlayoutDelayFieldTrial;
@@ -209,9 +284,12 @@ PeerConnectionFactory::PeerConnectionFactory(
       std::move(std::make_unique<livekit_ffi::VideoEncoderFactory>());
   dependencies.video_decoder_factory =
       std::move(std::make_unique<livekit_ffi::VideoDecoderFactory>());
-  dependencies.audio_encoder_factory = webrtc::CreateBuiltinAudioEncoderFactory();
-  dependencies.audio_decoder_factory = webrtc::CreateBuiltinAudioDecoderFactory();
-  dependencies.audio_processing_builder = std::make_unique<webrtc::BuiltinAudioProcessingBuilder>();
+  dependencies.audio_encoder_factory =
+      webrtc::CreateBuiltinAudioEncoderFactory();
+  dependencies.audio_decoder_factory =
+      webrtc::CreateBuiltinAudioDecoderFactory();
+  dependencies.audio_processing_builder =
+      std::make_unique<webrtc::BuiltinAudioProcessingBuilder>();
 
   webrtc::EnableMedia(dependencies);
   peer_factory_ =
@@ -228,8 +306,7 @@ PeerConnectionFactory::~PeerConnectionFactory() {
 
   peer_factory_ = nullptr;
   audio_device_ = nullptr;
-  rtc_runtime_->worker_thread()->BlockingCall(
-      [this] { adm_proxy_ = nullptr; });
+  rtc_runtime_->worker_thread()->BlockingCall([this] { adm_proxy_ = nullptr; });
 }
 
 std::shared_ptr<PeerConnection> PeerConnectionFactory::create_peer_connection(
@@ -295,7 +372,8 @@ RtpCapabilities PeerConnectionFactory::rtp_receiver_capabilities(
       static_cast<webrtc::MediaType>(type)));
 }
 
-std::shared_ptr<AudioDeviceController> PeerConnectionFactory::audio_device() const {
+std::shared_ptr<AudioDeviceController> PeerConnectionFactory::audio_device()
+    const {
   return audio_device_;
 }
 
