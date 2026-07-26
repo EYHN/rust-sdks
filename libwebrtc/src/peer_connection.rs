@@ -273,6 +273,9 @@ impl Debug for PeerConnection {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
+    use livekit_runtime::timeout;
     use log::trace;
     use tokio::sync::mpsc;
 
@@ -343,7 +346,19 @@ mod tests {
             alice_dc_tx.send(dc).unwrap();
         })));
 
-        let bob_dc = bob.create_data_channel("test_dc", DataChannelInit::default()).unwrap();
+        let bob_dc = bob.create_data_channel("reliable", DataChannelInit::default()).unwrap();
+        let _bob_unordered_partial = bob
+            .create_data_channel(
+                "unordered-partial",
+                DataChannelInit { ordered: false, max_retransmits: Some(0), ..Default::default() },
+            )
+            .unwrap();
+        let _bob_ordered_partial = bob
+            .create_data_channel(
+                "ordered-partial",
+                DataChannelInit { max_retransmit_time: Some(100), ..Default::default() },
+            )
+            .unwrap();
 
         let offer = bob.create_offer(OfferOptions::default()).await.unwrap();
         trace!("Bob offer: {:?}", offer);
@@ -362,7 +377,30 @@ mod tests {
         alice.add_ice_candidate(bob_ice).await.unwrap();
 
         let (data_tx, mut data_rx) = mpsc::unbounded_channel::<String>();
-        let alice_dc = alice_dc_rx.recv().await.unwrap();
+        let mut alice_reliable_dc = None;
+        for _ in 0..3 {
+            let dc = timeout(Duration::from_secs(5), alice_dc_rx.recv())
+                .await
+                .expect("timed out waiting for remotely negotiated data channel")
+                .expect("data channel observer closed");
+            match dc.label().as_str() {
+                "reliable" => {
+                    assert!(dc.reliable());
+                    assert!(dc.ordered());
+                    alice_reliable_dc = Some(dc);
+                }
+                "unordered-partial" => {
+                    assert!(!dc.reliable());
+                    assert!(!dc.ordered());
+                }
+                "ordered-partial" => {
+                    assert!(!dc.reliable());
+                    assert!(dc.ordered());
+                }
+                label => panic!("unexpected remotely negotiated data channel: {label}"),
+            }
+        }
+        let alice_dc = alice_reliable_dc.expect("reliable channel was not negotiated");
         alice_dc.on_message(Some(Box::new(move |buffer| {
             data_tx.send(String::from_utf8_lossy(buffer.data).to_string()).unwrap();
         })));
