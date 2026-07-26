@@ -75,6 +75,8 @@ pub struct PublishTimingEvent {
     pub rtp_timestamp: Option<u32>,
     /// SSRC that owns [`Self::rtp_timestamp`].
     pub ssrc: Option<u32>,
+    /// Whether the encoded frame is a keyframe, once encoding completes.
+    pub is_keyframe: Option<bool>,
 }
 
 /// Timestamped native remote video subscribe pipeline event.
@@ -115,6 +117,7 @@ impl From<sys_pt::VideoPublishTimingEvent> for PublishTimingEvent {
             frame_id: (event.frame_id != 0).then_some(event.frame_id),
             rtp_timestamp: event.has_rtp_timestamp.then_some(event.rtp_timestamp),
             ssrc: event.has_rtp_timestamp.then_some(event.ssrc),
+            is_keyframe: event.has_keyframe.then_some(event.is_keyframe),
         }
     }
 }
@@ -303,11 +306,14 @@ mod tests {
             has_rtp_timestamp: true,
             rtp_timestamp: 0,
             ssrc: 42,
+            has_keyframe: true,
+            is_keyframe: true,
         });
 
         assert_eq!(event.stage, PublishTimingStage::WebrtcPacketize);
         assert_eq!(event.rtp_timestamp, Some(0));
         assert_eq!(event.ssrc, Some(42));
+        assert_eq!(event.is_keyframe, Some(true));
     }
 
     #[test]
@@ -320,9 +326,29 @@ mod tests {
             has_rtp_timestamp: false,
             rtp_timestamp: 0,
             ssrc: 0,
+            has_keyframe: false,
+            is_keyframe: false,
         });
 
         assert_eq!(event.rtp_timestamp, None);
         assert_eq!(event.ssrc, None);
+        assert_eq!(event.is_keyframe, None);
+    }
+
+    #[test]
+    fn publish_timing_preserves_a_non_keyframe_value() {
+        let event = PublishTimingEvent::from(VideoPublishTimingEvent {
+            stage: VideoPublishTimingStage::EncoderOutput,
+            timestamp_us: 20,
+            capture_timestamp_us: 10,
+            frame_id: 7,
+            has_rtp_timestamp: true,
+            rtp_timestamp: 1,
+            ssrc: 42,
+            has_keyframe: true,
+            is_keyframe: false,
+        });
+
+        assert_eq!(event.is_keyframe, Some(false));
     }
 }
