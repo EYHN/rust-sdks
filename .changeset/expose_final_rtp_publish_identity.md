@@ -1,6 +1,8 @@
 ---
 webrtc-sys: patch
 libwebrtc: patch
+livekit: patch
+livekit-ffi: patch
 ---
 
 Add a V2 packet-trailer publish timing event exposing the final RTP timestamp,
