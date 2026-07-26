@@ -5,4 +5,5 @@ libwebrtc: patch
 
 Expose the final RTP timestamp, SSRC, and keyframe state on packet-trailer
 publish timing events, and allow raw video sources to opt out of the initial
-metadata-free keepalive frame.
+metadata-free keepalive frame. Expose received data-channel reliability and
+ordering so applications can enforce metadata delivery contracts.

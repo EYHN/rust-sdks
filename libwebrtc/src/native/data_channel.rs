@@ -86,6 +86,14 @@ impl DataChannel {
         self.sys_handle.label()
     }
 
+    pub fn reliable(&self) -> bool {
+        self.sys_handle.reliable()
+    }
+
+    pub fn ordered(&self) -> bool {
+        self.sys_handle.ordered()
+    }
+
     pub fn state(&self) -> DataChannelState {
         self.sys_handle.state().into()
     }

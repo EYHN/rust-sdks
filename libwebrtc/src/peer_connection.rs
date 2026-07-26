@@ -278,6 +278,37 @@ mod tests {
 
     use crate::{peer_connection::*, peer_connection_factory::*};
 
+    #[test]
+    fn data_channel_exposes_reliability_and_ordering() {
+        let factory = PeerConnectionFactory::default();
+        let connection = factory.create_peer_connection(RtcConfiguration::default()).unwrap();
+
+        let reliable =
+            connection.create_data_channel("reliable", DataChannelInit::default()).unwrap();
+        assert!(reliable.reliable());
+        assert!(reliable.ordered());
+
+        let unordered_partial = connection
+            .create_data_channel(
+                "unordered-partial",
+                DataChannelInit { ordered: false, max_retransmits: Some(0), ..Default::default() },
+            )
+            .unwrap();
+        assert!(!unordered_partial.reliable());
+        assert!(!unordered_partial.ordered());
+
+        let ordered_partial = connection
+            .create_data_channel(
+                "ordered-partial",
+                DataChannelInit { max_retransmit_time: Some(100), ..Default::default() },
+            )
+            .unwrap();
+        assert!(!ordered_partial.reliable());
+        assert!(ordered_partial.ordered());
+
+        connection.close();
+    }
+
     #[tokio::test]
     async fn create_pc() {
         let _ = env_logger::builder().is_test(true).try_init();
