@@ -16,6 +16,9 @@ use crate::impl_thread_safety;
 
 /// Callback invoked for native video publish pipeline timing events.
 pub type OnVideoPublishTiming = Box<dyn Fn(ffi::VideoPublishTimingEvent) + Send + Sync + 'static>;
+/// Callback invoked for native video publish pipeline timing events with final RTP identity.
+pub type OnVideoPublishTimingV2 =
+    Box<dyn Fn(ffi::VideoPublishTimingEventV2) + Send + Sync + 'static>;
 /// Callback invoked for native video subscribe pipeline timing events.
 pub type OnVideoSubscribeTiming =
     Box<dyn Fn(ffi::VideoSubscribeTimingEvent) + Send + Sync + 'static>;
@@ -40,6 +43,14 @@ pub mod ffi {
 
     #[derive(Debug, Clone, Copy)]
     pub struct VideoPublishTimingEvent {
+        pub stage: VideoPublishTimingStage,
+        pub timestamp_us: u64,
+        pub capture_timestamp_us: u64,
+        pub frame_id: u32,
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    pub struct VideoPublishTimingEventV2 {
         pub stage: VideoPublishTimingStage,
         pub timestamp_us: u64,
         pub capture_timestamp_us: u64,
@@ -109,6 +120,15 @@ pub mod ffi {
         /// Clear the sender-side publish timing callback.
         fn clear_publish_timing_observer(self: &PacketTrailerHandler);
 
+        /// Set a callback for sender-side publish timing events with final RTP identity.
+        fn set_publish_timing_observer_v2(
+            self: &PacketTrailerHandler,
+            observer: Box<VideoPublishTimingObserverV2Wrapper>,
+        );
+
+        /// Clear the sender-side V2 publish timing callback.
+        fn clear_publish_timing_observer_v2(self: &PacketTrailerHandler);
+
         /// Set a callback for receiver-side subscribe timing events.
         fn set_subscribe_timing_observer(
             self: &PacketTrailerHandler,
@@ -141,11 +161,17 @@ pub mod ffi {
 
     extern "Rust" {
         type VideoPublishTimingObserverWrapper;
+        type VideoPublishTimingObserverV2Wrapper;
         type VideoSubscribeTimingObserverWrapper;
 
         fn on_publish_timing(
             self: &VideoPublishTimingObserverWrapper,
             event: VideoPublishTimingEvent,
+        );
+
+        fn on_publish_timing_v2(
+            self: &VideoPublishTimingObserverV2Wrapper,
+            event: VideoPublishTimingEventV2,
         );
 
         fn on_subscribe_timing(
@@ -167,6 +193,20 @@ impl VideoPublishTimingObserverWrapper {
     }
 
     fn on_publish_timing(&self, event: ffi::VideoPublishTimingEvent) {
+        (self.observer)(event);
+    }
+}
+
+pub struct VideoPublishTimingObserverV2Wrapper {
+    observer: OnVideoPublishTimingV2,
+}
+
+impl VideoPublishTimingObserverV2Wrapper {
+    pub fn new(observer: OnVideoPublishTimingV2) -> Self {
+        Self { observer }
+    }
+
+    fn on_publish_timing_v2(&self, event: ffi::VideoPublishTimingEventV2) {
         (self.observer)(event);
     }
 }

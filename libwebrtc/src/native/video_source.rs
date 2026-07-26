@@ -48,8 +48,6 @@ impl From<VideoResolution> for vt_sys::ffi::VideoResolution {
 pub struct NativeVideoSource {
     sys_handle: SharedPtr<vt_sys::ffi::VideoTrackSource>,
     captured_frames: Arc<AtomicUsize>,
-    #[cfg(test)]
-    raw_keepalive: bool,
 }
 
 impl NativeVideoSource {
@@ -90,8 +88,6 @@ impl NativeVideoSource {
                 is_screencast,
             ),
             captured_frames: Arc::new(AtomicUsize::new(0)),
-            #[cfg(test)]
-            raw_keepalive,
         };
 
         if raw_keepalive {
@@ -305,23 +301,63 @@ impl NativeVideoSource {
     pub fn video_resolution(&self) -> VideoResolution {
         self.sys_handle.video_resolution().into()
     }
-
-    #[cfg(test)]
-    fn raw_keepalive_enabled(&self) -> bool {
-        self.raw_keepalive
-    }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::{future::poll_fn, pin::Pin, time::Duration};
+
+    use livekit_runtime::{timeout, Stream};
+
     use super::NativeVideoSource;
-    use crate::video_source::VideoResolution;
+    use crate::{
+        peer_connection_factory::{native::PeerConnectionFactoryExt, PeerConnectionFactory},
+        video_frame::{FrameMetadata, I420Buffer, VideoFrame, VideoRotation},
+        video_source::{native::NativeVideoSource as PublicNativeVideoSource, VideoResolution},
+        video_stream::native::NativeVideoStream,
+    };
 
-    #[test]
-    fn source_without_keepalive_disables_the_initial_raw_frame() {
-        let source =
-            NativeVideoSource::new_without_keepalive(VideoResolution { width: 2, height: 2 }, true);
+    #[tokio::test]
+    async fn source_without_keepalive_emits_no_frame_before_application_capture() {
+        let source = NativeVideoSource::new_without_keepalive(
+            VideoResolution { width: 320, height: 180 },
+            true,
+        );
+        let factory = PeerConnectionFactory::default();
+        let track = factory
+            .create_video_track("no-keepalive", PublicNativeVideoSource { handle: source.clone() });
+        let mut stream = NativeVideoStream::new(track);
 
-        assert!(!source.raw_keepalive_enabled());
+        let startup_frame = timeout(
+            Duration::from_millis(250),
+            poll_fn(|context| Pin::new(&mut stream).poll_next(context)),
+        )
+        .await;
+        assert!(
+            startup_frame.is_err(),
+            "a no-keepalive source emitted a metadata-free startup frame"
+        );
+
+        let frame = VideoFrame {
+            rotation: VideoRotation::VideoRotation0,
+            timestamp_us: 123_000,
+            frame_metadata: Some(FrameMetadata {
+                user_timestamp: Some(123_000),
+                frame_id: Some(7),
+                user_data: None,
+            }),
+            buffer: I420Buffer::new(320, 180),
+        };
+        source.capture_frame(&frame);
+
+        let captured = timeout(
+            Duration::from_secs(1),
+            poll_fn(|context| Pin::new(&mut stream).poll_next(context)),
+        )
+        .await
+        .expect("application frame was not delivered")
+        .expect("video stream closed before application frame");
+        assert_eq!(captured.buffer.width(), 320);
+        assert_eq!(captured.buffer.height(), 180);
     }
 }
