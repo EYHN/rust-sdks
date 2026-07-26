@@ -179,6 +179,12 @@ class PacketTrailerTransformer : public webrtc::FrameTransformerInterface {
       std::unique_ptr<webrtc::TransformableFrameInterface> frame);
   void TransformReceive(
       std::unique_ptr<webrtc::TransformableFrameInterface> frame);
+  void emit_publish_timing(VideoPublishTimingStage stage,
+                           uint64_t user_timestamp,
+                           uint32_t frame_id,
+                           bool has_rtp_timestamp,
+                           uint32_t rtp_timestamp,
+                           uint32_t ssrc) const;
   void emit_subscribe_timing(VideoSubscribeTimingStage stage,
                              uint64_t user_timestamp,
                              uint32_t frame_id,
