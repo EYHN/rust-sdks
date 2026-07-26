@@ -47,6 +47,8 @@ class DataChannel {
   bool send(const DataBuffer& buffer) const;
   int id() const;
   rust::String label() const;
+  bool reliable() const;
+  bool ordered() const;
   DataState state() const;
   void close() const;
   uint64_t buffered_amount() const;
