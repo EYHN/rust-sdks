@@ -48,11 +48,25 @@ impl From<VideoResolution> for vt_sys::ffi::VideoResolution {
 pub struct NativeVideoSource {
     sys_handle: SharedPtr<vt_sys::ffi::VideoTrackSource>,
     captured_frames: Arc<AtomicUsize>,
+    #[cfg(test)]
+    raw_keepalive: bool,
 }
 
 impl NativeVideoSource {
     pub fn new(resolution: VideoResolution, is_screencast: bool) -> NativeVideoSource {
         Self::new_inner(resolution, is_screencast, true)
+    }
+
+    /// Creates a raw-frame source without injecting a black keepalive frame.
+    ///
+    /// Use this when every encoded frame must correspond to application
+    /// metadata registered before capture. The track has no frame until the
+    /// caller submits the first raw frame.
+    pub fn new_without_keepalive(
+        resolution: VideoResolution,
+        is_screencast: bool,
+    ) -> NativeVideoSource {
+        Self::new_inner(resolution, is_screencast, false)
     }
 
     /// Creates a source for pre-encoded access units.
@@ -76,6 +90,8 @@ impl NativeVideoSource {
                 is_screencast,
             ),
             captured_frames: Arc::new(AtomicUsize::new(0)),
+            #[cfg(test)]
+            raw_keepalive,
         };
 
         if raw_keepalive {
@@ -284,5 +300,24 @@ impl NativeVideoSource {
 
     pub fn video_resolution(&self) -> VideoResolution {
         self.sys_handle.video_resolution().into()
+    }
+
+    #[cfg(test)]
+    fn raw_keepalive_enabled(&self) -> bool {
+        self.raw_keepalive
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::NativeVideoSource;
+    use crate::video_source::VideoResolution;
+
+    #[test]
+    fn source_without_keepalive_disables_the_initial_raw_frame() {
+        let source =
+            NativeVideoSource::new_without_keepalive(VideoResolution { width: 2, height: 2 }, true);
+
+        assert!(!source.raw_keepalive_enabled());
     }
 }
