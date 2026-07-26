@@ -47,6 +47,8 @@ pub mod ffi {
         pub has_rtp_timestamp: bool,
         pub rtp_timestamp: u32,
         pub ssrc: u32,
+        pub has_keyframe: bool,
+        pub is_keyframe: bool,
     }
 
     #[derive(Debug, Clone, Copy)]
