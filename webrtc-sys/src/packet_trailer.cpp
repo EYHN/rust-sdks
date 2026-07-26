@@ -229,6 +229,9 @@ void PacketTrailerTransformer::TransformSend(
     std::unique_ptr<webrtc::TransformableFrameInterface> frame) {
   uint32_t rtp_timestamp = frame->GetTimestamp();
   uint32_t ssrc = frame->GetSsrc();
+  const bool is_keyframe =
+      static_cast<const webrtc::TransformableVideoFrameInterface*>(frame.get())
+          ->IsKeyFrame();
 
   auto data = frame->GetData();
   const bool is_av1 = av1::IsAv1Frame(*frame);
@@ -236,7 +239,7 @@ void PacketTrailerTransformer::TransformSend(
       LookupSendMetadata(*frame, ssrc, rtp_timestamp);
   emit_publish_timing(VideoPublishTimingStage::EncoderOutput,
                       meta_to_embed.user_timestamp, meta_to_embed.frame_id,
-                      true, rtp_timestamp, ssrc);
+                      true, rtp_timestamp, ssrc, true, is_keyframe);
 
   // Append a trailer only when at least one metadata field is set;
   // AppendTrailer returns the data unchanged when there is nothing to
@@ -264,7 +267,7 @@ void PacketTrailerTransformer::TransformSend(
   if (cb) {
     emit_publish_timing(VideoPublishTimingStage::WebrtcPacketize,
                         meta_to_embed.user_timestamp, meta_to_embed.frame_id,
-                        true, rtp_timestamp, ssrc);
+                        true, rtp_timestamp, ssrc, true, is_keyframe);
     cb->OnTransformedFrame(std::move(frame));
   } else {
     RTC_LOG(LS_WARNING)
@@ -555,7 +558,8 @@ void PacketTrailerTransformer::emit_publish_timing(
     VideoPublishTimingStage stage,
     uint64_t user_timestamp,
     uint32_t frame_id) const {
-  emit_publish_timing(stage, user_timestamp, frame_id, false, 0, 0);
+  emit_publish_timing(stage, user_timestamp, frame_id, false, 0, 0, false,
+                      false);
 }
 
 void PacketTrailerTransformer::emit_publish_timing(
@@ -564,7 +568,9 @@ void PacketTrailerTransformer::emit_publish_timing(
     uint32_t frame_id,
     bool has_rtp_timestamp,
     uint32_t rtp_timestamp,
-    uint32_t ssrc) const {
+    uint32_t ssrc,
+    bool has_keyframe,
+    bool is_keyframe) const {
   if (!publish_timing_enabled()) {
     return;
   }
@@ -580,7 +586,7 @@ void PacketTrailerTransformer::emit_publish_timing(
 
   (*observer)->on_publish_timing(VideoPublishTimingEvent{
       stage, CurrentUnixTimeMicros(), user_timestamp, frame_id,
-      has_rtp_timestamp, rtp_timestamp, ssrc});
+      has_rtp_timestamp, rtp_timestamp, ssrc, has_keyframe, is_keyframe});
 }
 
 void PacketTrailerTransformer::set_subscribe_timing_observer(
