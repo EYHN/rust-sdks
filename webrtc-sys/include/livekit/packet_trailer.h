@@ -45,6 +45,7 @@ class RtpReceiver;
 enum class VideoPublishTimingStage : int32_t;
 enum class VideoSubscribeTimingStage : int32_t;
 struct VideoPublishTimingObserverWrapper;
+struct VideoPublishTimingObserverV2Wrapper;
 struct VideoSubscribeTimingObserverWrapper;
 }  // namespace livekit_ffi
 
@@ -158,6 +159,13 @@ class PacketTrailerTransformer : public webrtc::FrameTransformerInterface {
   /// Clear the observer receiving sender-side publish timing events.
   void clear_publish_timing_observer();
 
+  /// Set the V2 observer receiving final RTP frame identity.
+  void set_publish_timing_observer_v2(
+      rust::Box<VideoPublishTimingObserverV2Wrapper> observer);
+
+  /// Clear the V2 sender-side publish timing observer.
+  void clear_publish_timing_observer_v2();
+
   /// Emit a sender-side publish timing event.
   void emit_publish_timing(VideoPublishTimingStage stage,
                            uint64_t user_timestamp,
@@ -244,6 +252,10 @@ class PacketTrailerTransformer : public webrtc::FrameTransformerInterface {
   std::atomic<bool> publish_timing_enabled_{false};
   mutable std::shared_ptr<rust::Box<VideoPublishTimingObserverWrapper>>
       publish_timing_observer_;
+  mutable webrtc::Mutex publish_timing_observer_v2_mutex_;
+  std::atomic<bool> publish_timing_v2_enabled_{false};
+  mutable std::shared_ptr<rust::Box<VideoPublishTimingObserverV2Wrapper>>
+      publish_timing_observer_v2_;
   mutable webrtc::Mutex subscribe_timing_observer_mutex_;
   std::atomic<bool> subscribe_timing_enabled_{false};
   mutable std::shared_ptr<rust::Box<VideoSubscribeTimingObserverWrapper>>
@@ -293,6 +305,13 @@ class PacketTrailerHandler {
 
   /// Clear the observer receiving sender-side publish timing events.
   void clear_publish_timing_observer() const;
+
+  /// Set the V2 observer receiving final RTP frame identity.
+  void set_publish_timing_observer_v2(
+      rust::Box<VideoPublishTimingObserverV2Wrapper> observer) const;
+
+  /// Clear the V2 sender-side publish timing observer.
+  void clear_publish_timing_observer_v2() const;
 
   /// Emit a sender-side publish timing event.
   void emit_publish_timing(VideoPublishTimingStage stage,

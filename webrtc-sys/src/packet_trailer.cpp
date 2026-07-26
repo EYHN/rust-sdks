@@ -19,12 +19,14 @@
 #include <chrono>
 #include <cstring>
 #include <optional>
+#include <string>
 
 #include "api/make_ref_counted.h"
 #include "livekit/packet_trailer_av1.h"
 #include "livekit/peer_connection_factory.h"
 #include "livekit/rtp_receiver.h"
 #include "livekit/rtp_sender.h"
+#include "rtc_base/checks.h"
 #include "rtc_base/logging.h"
 #include "webrtc-sys/src/packet_trailer.rs.h"
 
@@ -229,6 +231,10 @@ void PacketTrailerTransformer::TransformSend(
     std::unique_ptr<webrtc::TransformableFrameInterface> frame) {
   uint32_t rtp_timestamp = frame->GetTimestamp();
   uint32_t ssrc = frame->GetSsrc();
+  const std::string mime_type = frame->GetMimeType();
+  RTC_CHECK(mime_type.rfind("video/", 0) == 0)
+      << "PacketTrailerTransformer received a non-video send frame: "
+      << mime_type;
   const bool is_keyframe =
       static_cast<const webrtc::TransformableVideoFrameInterface*>(frame.get())
           ->IsKeyFrame();
@@ -554,6 +560,21 @@ void PacketTrailerTransformer::clear_publish_timing_observer() {
   publish_timing_enabled_.store(false);
 }
 
+void PacketTrailerTransformer::set_publish_timing_observer_v2(
+    rust::Box<VideoPublishTimingObserverV2Wrapper> observer) {
+  webrtc::MutexLock lock(&publish_timing_observer_v2_mutex_);
+  publish_timing_observer_v2_ =
+      std::make_shared<rust::Box<VideoPublishTimingObserverV2Wrapper>>(
+          std::move(observer));
+  publish_timing_v2_enabled_.store(true);
+}
+
+void PacketTrailerTransformer::clear_publish_timing_observer_v2() {
+  webrtc::MutexLock lock(&publish_timing_observer_v2_mutex_);
+  publish_timing_observer_v2_.reset();
+  publish_timing_v2_enabled_.store(false);
+}
+
 void PacketTrailerTransformer::emit_publish_timing(
     VideoPublishTimingStage stage,
     uint64_t user_timestamp,
@@ -575,18 +596,27 @@ void PacketTrailerTransformer::emit_publish_timing(
     return;
   }
 
+  const uint64_t timestamp_us = CurrentUnixTimeMicros();
   std::shared_ptr<rust::Box<VideoPublishTimingObserverWrapper>> observer;
-  {
+  if (publish_timing_enabled_.load()) {
     webrtc::MutexLock lock(&publish_timing_observer_mutex_);
     observer = publish_timing_observer_;
   }
-  if (!observer) {
-    return;
+  if (observer) {
+    (*observer)->on_publish_timing(VideoPublishTimingEvent{
+        stage, timestamp_us, user_timestamp, frame_id});
   }
 
-  (*observer)->on_publish_timing(VideoPublishTimingEvent{
-      stage, CurrentUnixTimeMicros(), user_timestamp, frame_id,
-      has_rtp_timestamp, rtp_timestamp, ssrc, has_keyframe, is_keyframe});
+  std::shared_ptr<rust::Box<VideoPublishTimingObserverV2Wrapper>> observer_v2;
+  if (publish_timing_v2_enabled_.load()) {
+    webrtc::MutexLock lock(&publish_timing_observer_v2_mutex_);
+    observer_v2 = publish_timing_observer_v2_;
+  }
+  if (observer_v2) {
+    (*observer_v2)->on_publish_timing_v2(VideoPublishTimingEventV2{
+        stage, timestamp_us, user_timestamp, frame_id, has_rtp_timestamp,
+        rtp_timestamp, ssrc, has_keyframe, is_keyframe});
+  }
 }
 
 void PacketTrailerTransformer::set_subscribe_timing_observer(
@@ -639,7 +669,7 @@ void PacketTrailerTransformer::emit_subscribe_timing(
 }
 
 bool PacketTrailerTransformer::publish_timing_enabled() const {
-  return publish_timing_enabled_.load();
+  return publish_timing_enabled_.load() || publish_timing_v2_enabled_.load();
 }
 
 bool PacketTrailerTransformer::subscribe_timing_enabled() const {
@@ -652,6 +682,9 @@ PacketTrailerHandler::PacketTrailerHandler(
     std::shared_ptr<RtcRuntime> rtc_runtime,
     webrtc::scoped_refptr<webrtc::RtpSenderInterface> sender)
     : rtc_runtime_(rtc_runtime), sender_(sender) {
+  RTC_CHECK(sender_);
+  RTC_CHECK(sender_->media_type() == webrtc::MediaType::VIDEO)
+      << "PacketTrailerHandler requires a video RTP sender";
   transformer_ = webrtc::make_ref_counted<PacketTrailerTransformer>(
       PacketTrailerTransformer::Direction::kSend);
   sender->SetEncoderToPacketizerFrameTransformer(transformer_);
@@ -715,6 +748,15 @@ void PacketTrailerHandler::clear_publish_timing_observer() const {
   transformer_->clear_publish_timing_observer();
 }
 
+void PacketTrailerHandler::set_publish_timing_observer_v2(
+    rust::Box<VideoPublishTimingObserverV2Wrapper> observer) const {
+  transformer_->set_publish_timing_observer_v2(std::move(observer));
+}
+
+void PacketTrailerHandler::clear_publish_timing_observer_v2() const {
+  transformer_->clear_publish_timing_observer_v2();
+}
+
 void PacketTrailerHandler::emit_publish_timing(
     VideoPublishTimingStage stage,
     uint64_t user_timestamp,
@@ -747,6 +789,12 @@ webrtc::scoped_refptr<PacketTrailerTransformer> PacketTrailerHandler::transforme
 std::shared_ptr<PacketTrailerHandler> new_packet_trailer_sender(
     std::shared_ptr<PeerConnectionFactory> peer_factory,
     std::shared_ptr<RtpSender> sender) {
+  if (!peer_factory || !sender || !sender->rtc_sender() ||
+      sender->rtc_sender()->media_type() != webrtc::MediaType::VIDEO) {
+    RTC_LOG(LS_ERROR)
+        << "new_packet_trailer_sender requires a video RTP sender";
+    return nullptr;
+  }
   return std::make_shared<PacketTrailerHandler>(
       peer_factory->rtc_runtime(), sender->rtc_sender());
 }
