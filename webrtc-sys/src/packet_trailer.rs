@@ -44,6 +44,9 @@ pub mod ffi {
         pub timestamp_us: u64,
         pub capture_timestamp_us: u64,
         pub frame_id: u32,
+        pub has_rtp_timestamp: bool,
+        pub rtp_timestamp: u32,
+        pub ssrc: u32,
     }
 
     #[derive(Debug, Clone, Copy)]
