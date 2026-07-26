@@ -252,10 +252,16 @@ async fn test_e2ee() -> Result<()> {
         assert!(got_frame);
     };
 
-    let _ = timeout(Duration::from_secs(5), async {
+    // Establishing the encrypted data-track pipeline can exceed five seconds
+    // on a loaded Windows runner even after both participants are visible.
+    // Keep this bounded, but use the same allowance as the unencrypted
+    // multi-packet data-track test so scheduling latency is not mistaken for
+    // an E2EE transport failure.
+    let _ = timeout(Duration::from_secs(15), async {
         tokio::select! { _ = publish => (), _ = subscribe => () };
     })
-    .await?;
+    .await
+    .map_err(|_| anyhow!("timed out waiting for an encrypted data-track frame"))?;
 
     Ok(())
 }
