@@ -69,6 +69,12 @@ pub struct PublishTimingEvent {
     pub capture_timestamp_us: u64,
     /// Optional application frame ID associated with this frame.
     pub frame_id: Option<u32>,
+    /// Final RTP timestamp assigned by the sender, once packetization starts.
+    ///
+    /// This is `None` for stages before an RTP timestamp exists.
+    pub rtp_timestamp: Option<u32>,
+    /// SSRC that owns [`Self::rtp_timestamp`].
+    pub ssrc: Option<u32>,
 }
 
 /// Timestamped native remote video subscribe pipeline event.
@@ -107,6 +113,8 @@ impl From<sys_pt::VideoPublishTimingEvent> for PublishTimingEvent {
             timestamp_us: event.timestamp_us,
             capture_timestamp_us: event.capture_timestamp_us,
             frame_id: (event.frame_id != 0).then_some(event.frame_id),
+            rtp_timestamp: event.has_rtp_timestamp.then_some(event.rtp_timestamp),
+            ssrc: event.has_rtp_timestamp.then_some(event.ssrc),
         }
     }
 }
@@ -277,5 +285,44 @@ pub fn create_receiver_handler(
             peer_factory.handle.sys_handle.clone(),
             receiver.handle.sys_handle.clone(),
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{PublishTimingEvent, PublishTimingStage};
+    use webrtc_sys::packet_trailer::ffi::{VideoPublishTimingEvent, VideoPublishTimingStage};
+
+    #[test]
+    fn publish_timing_preserves_an_exact_zero_rtp_timestamp() {
+        let event = PublishTimingEvent::from(VideoPublishTimingEvent {
+            stage: VideoPublishTimingStage::WebrtcPacketize,
+            timestamp_us: 20,
+            capture_timestamp_us: 10,
+            frame_id: 7,
+            has_rtp_timestamp: true,
+            rtp_timestamp: 0,
+            ssrc: 42,
+        });
+
+        assert_eq!(event.stage, PublishTimingStage::WebrtcPacketize);
+        assert_eq!(event.rtp_timestamp, Some(0));
+        assert_eq!(event.ssrc, Some(42));
+    }
+
+    #[test]
+    fn publish_timing_keeps_pre_packetization_rtp_identity_absent() {
+        let event = PublishTimingEvent::from(VideoPublishTimingEvent {
+            stage: VideoPublishTimingStage::EncoderUpload,
+            timestamp_us: 20,
+            capture_timestamp_us: 10,
+            frame_id: 7,
+            has_rtp_timestamp: false,
+            rtp_timestamp: 0,
+            ssrc: 0,
+        });
+
+        assert_eq!(event.rtp_timestamp, None);
+        assert_eq!(event.ssrc, None);
     }
 }
