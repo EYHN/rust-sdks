@@ -21,8 +21,10 @@ on:
 
 jobs:
   build:
-    # SimKit fork: only the mac-arm64 target is built (the daemon's only
-    # deployment platform); the full upstream matrix is trimmed to save CI.
+    # SimKit fork: only the targets SimKit ships on are built — mac-arm64
+    # (the iOS simulator hosts) and linux-x64 (the Android emulator hosts:
+    # Google publishes the SDK emulator for x86_64 Linux only). The rest of
+    # the upstream matrix is trimmed to save CI.
     strategy:
       fail-fast: false
       matrix:
@@ -31,6 +33,10 @@ jobs:
             os: macos-latest
             cmd: ./build_macos.sh
             arch: arm64
+          - name: linux
+            os: ubuntu-latest
+            cmd: ./build_linux.sh
+            arch: x64
         profile:
           - release
 
