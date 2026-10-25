@@ -18,6 +18,14 @@ on:
     tags:
       - "webrtc-*"
   workflow_dispatch:
+    inputs:
+      release_tag:
+        # SimKit fork: Actions artifacts expire, so anything SimKit pins must
+        # come from a release. Name a new tag, e.g.
+        # simkit-webrtc-<WEBRTC_TAG suffix>-<short sha>; empty builds only.
+        description: "Publish the archives to this release tag (empty: build only)"
+        type: string
+        default: ""
 
 jobs:
   build:
@@ -128,24 +136,54 @@ jobs:
           path: ${{ steps.setup.outputs.ZIP }}
 
   release:
+    # SimKit fork: publishes each artifact's wrapper ZIP exactly as GitHub's
+    # artifact API serves it — the file SimKit's WebRTCArtifact.lock.json
+    # pins by sha256 — plus SHA256SUMS, onto a release that never expires.
+    # The release is created when it does not exist yet.
     name: Release to GH
     runs-on: ubuntu-latest
     needs: build
     permissions:
       contents: write
-    if: startsWith(github.ref, 'refs/tags/webrtc-')
+      actions: read
+    if: startsWith(github.ref, 'refs/tags/webrtc-') || inputs.release_tag != ''
     env:
       GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ inputs.release_tag || github.ref_name }}
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-
-      - name: Download artifacts
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          pattern: webrtc-builds-*
-          merge-multiple: true
-          path: ${{ github.workspace }}/webrtc-builds
-
-      - name: Create draft release
+      - name: Download the wrapper ZIPs
         run: |
-          gh release upload ${{ github.ref_name }} ${{ github.workspace }}/webrtc-builds/*
+          set -euo pipefail
+          mkdir webrtc-builds && cd webrtc-builds
+          gh api --paginate "repos/$GH_REPO/actions/runs/$GITHUB_RUN_ID/artifacts?per_page=100" \
+            --jq '.artifacts[] | select(.name | startswith("webrtc-builds-")) | "\(.id) \(.name)"' > ../artifacts.txt
+          test -s ../artifacts.txt
+          while read -r id name; do
+            gh api -H 'Accept: application/vnd.github+json' \
+              "repos/$GH_REPO/actions/artifacts/$id/zip" > "$name.github-artifact.zip"
+          done < ../artifacts.txt
+          sha256sum *.github-artifact.zip > SHA256SUMS
+          cat ../artifacts.txt SHA256SUMS
+
+      - name: Publish
+        run: |
+          set -euo pipefail
+          cd webrtc-builds
+          {
+            echo "Prebuilt libwebrtc from run $GITHUB_RUN_ID, built from $GITHUB_SHA."
+            echo
+            echo "Each file is an Actions artifact's wrapper ZIP (artifact ID, name):"
+            echo
+            sed 's/^/- /' ../artifacts.txt
+            echo
+            echo '```'
+            cat SHA256SUMS
+            echo '```'
+          } > ../notes.md
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            gh release upload "$TAG" *.github-artifact.zip SHA256SUMS
+          else
+            gh release create "$TAG" --target "$GITHUB_SHA" --title "$TAG" \
+              --notes-file ../notes.md *.github-artifact.zip SHA256SUMS
+          fi
